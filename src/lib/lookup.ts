@@ -163,7 +163,7 @@ export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
 
 /** « titre - auteur » ou « titre, auteur » → { title, author } (auteur optionnel). */
 function splitQuery(text: string): { title: string; author?: string } {
-  const m = text.match(/^(.+?)\s+(?:-|–|—|,)\s+(.+)$/i);
+  const m = text.match(/^(.+?)(?:\s+[-–—]\s+|\s*,\s*)(.+)$/);
   return m ? { title: m[1].trim(), author: m[2].trim() } : { title: text.trim() };
 }
 
