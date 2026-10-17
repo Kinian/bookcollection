@@ -20,18 +20,41 @@ export function isValidIsbn(isbn: string): boolean {
 
 const https = (u?: string) => u?.replace(/^http:/, 'https:');
 
-async function fromGoogle(isbn: string): Promise<LookupResult | null> {
+/** ISBN-13 (978…) → ISBN-10, pour les bases qui n'indexent que l'ancien format. */
+function toIsbn10(isbn13: string): string | null {
+  if (!/^978\d{10}$/.test(isbn13)) return null;
+  const core = isbn13.slice(3, 12);
+  const sum = [...core].reduce((s, c, i) => s + Number(c) * (10 - i), 0);
+  const check = (11 - (sum % 11)) % 11;
+  return core + (check === 10 ? 'X' : String(check));
+}
+
+function toIsbn13(isbn10: string): string {
+  const core = '978' + isbn10.slice(0, 9);
+  const sum = [...core].reduce((s, c, i) => s + Number(c) * (i % 2 ? 3 : 1), 0);
+  return core + String((10 - (sum % 10)) % 10);
+}
+
+/** Toutes les écritures équivalentes d'un ISBN (13 puis 10). */
+function isbnVariants(isbn: string): string[] {
+  if (isbn.length === 10) return [toIsbn13(isbn), isbn];
+  const ten = toIsbn10(isbn);
+  return ten ? [isbn, ten] : [isbn];
+}
+
+const googleKey = () => {
   const key = import.meta.env.VITE_GOOGLE_BOOKS_API_KEY;
-  const url = `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}${key ? `&key=${key}` : ''}`;
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  const json = await res.json();
-  const v = json.items?.[0]?.volumeInfo;
-  if (!v) return null;
+  return key ? `&key=${key}` : '';
+};
+
+function googleToResult(v: any, fallbackIsbn?: string): LookupResult {
   const img = v.imageLinks?.thumbnail || v.imageLinks?.smallThumbnail;
+  const ids: any[] = v.industryIdentifiers ?? [];
+  const isbn =
+    ids.find((i) => i.type === 'ISBN_13')?.identifier ?? ids.find((i) => i.type === 'ISBN_10')?.identifier ?? fallbackIsbn;
   return {
-    isbn,
-    title: v.title,
+    isbn: isbn ? normalizeIsbn(isbn) : undefined,
+    title: v.title ?? '',
     subtitle: v.subtitle,
     authors: v.authors ?? [],
     description: v.description,
@@ -44,24 +67,76 @@ async function fromGoogle(isbn: string): Promise<LookupResult | null> {
   };
 }
 
-async function fromOpenLibrary(isbn: string): Promise<LookupResult | null> {
-  const res = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
-  if (!res.ok) return null;
+async function googleQuery(q: string, max = 1): Promise<any[]> {
+  const res = await fetch(
+    `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=${max}&printType=books${googleKey()}`,
+  );
+  if (!res.ok) return [];
   const json = await res.json();
-  const b = json[`ISBN:${isbn}`];
-  if (!b) return null;
+  return (json.items ?? []).map((i: any) => i.volumeInfo).filter(Boolean);
+}
+
+async function fromGoogle(isbn: string): Promise<LookupResult | null> {
+  for (const variant of isbnVariants(isbn)) {
+    const [v] = await googleQuery(`isbn:${variant}`);
+    if (v) return googleToResult(v, isbn);
+  }
+  // Certaines éditions ne sont trouvées qu'en recherche libre.
+  const [v] = await googleQuery(isbn);
+  return v ? googleToResult(v, isbn) : null;
+}
+
+async function fromOpenLibrary(isbn: string): Promise<LookupResult | null> {
+  const variants = isbnVariants(isbn);
+  const keys = variants.map((v) => `ISBN:${v}`).join(',');
+  const res = await fetch(`https://openlibrary.org/api/books?bibkeys=${keys}&format=json&jscmd=data`);
+  if (res.ok) {
+    const json = await res.json();
+    const b = json[Object.keys(json)[0]];
+    if (b) {
+      return {
+        isbn,
+        title: b.title,
+        subtitle: b.subtitle,
+        authors: (b.authors ?? []).map((a: any) => a.name),
+        pageCount: b.number_of_pages,
+        categories: (b.subjects ?? []).slice(0, 3).map((s: any) => s.name),
+        publisher: b.publishers?.[0]?.name,
+        publishedDate: b.publish_date,
+        coverUrl: b.cover?.large || b.cover?.medium,
+        description: typeof b.notes === 'string' ? b.notes : b.notes?.value,
+      };
+    }
+  }
+  // Repli : l'index de recherche couvre des éditions absentes de l'API « books ».
+  const [hit] = await openLibrarySearch(`isbn=${isbn}`, 1);
+  return hit ? { ...hit, isbn } : null;
+}
+
+const OL_FIELDS = 'key,title,subtitle,author_name,first_publish_year,isbn,cover_i,number_of_pages_median,publisher,language,subject';
+
+function olDocToResult(d: any): LookupResult {
+  const isbns: string[] = d.isbn ?? [];
+  const isbn = isbns.find((i) => i.length === 13) ?? isbns[0];
   return {
-    isbn,
-    title: b.title,
-    subtitle: b.subtitle,
-    authors: (b.authors ?? []).map((a: any) => a.name),
-    pageCount: b.number_of_pages,
-    categories: (b.subjects ?? []).slice(0, 3).map((s: any) => s.name),
-    publisher: b.publishers?.[0]?.name,
-    publishedDate: b.publish_date,
-    coverUrl: b.cover?.large || b.cover?.medium,
-    description: typeof b.notes === 'string' ? b.notes : b.notes?.value,
+    isbn: isbn ? normalizeIsbn(isbn) : undefined,
+    title: d.title ?? '',
+    subtitle: d.subtitle,
+    authors: d.author_name ?? [],
+    pageCount: d.number_of_pages_median,
+    categories: (d.subject ?? []).slice(0, 3),
+    publisher: d.publisher?.[0],
+    publishedDate: d.first_publish_year ? String(d.first_publish_year) : undefined,
+    language: d.language?.[0] === 'fre' ? 'fr' : d.language?.[0],
+    coverUrl: d.cover_i ? `https://covers.openlibrary.org/b/id/${d.cover_i}-L.jpg` : undefined,
   };
+}
+
+async function openLibrarySearch(params: string, limit: number): Promise<LookupResult[]> {
+  const res = await fetch(`https://openlibrary.org/search.json?${params}&fields=${OL_FIELDS}&limit=${limit}`);
+  if (!res.ok) return [];
+  const json = await res.json();
+  return (json.docs ?? []).map(olDocToResult).filter((r: LookupResult) => r.title);
 }
 
 /** Interroge Google Books puis complète les trous avec Open Library. */
@@ -75,6 +150,7 @@ export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
   const extra = google ? ol : null;
   return {
     ...base,
+    isbn,
     title: base.title || extra?.title || '',
     authors: base.authors.length ? base.authors : extra?.authors ?? [],
     description: base.description || extra?.description,
@@ -83,4 +159,49 @@ export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
     coverUrl:
       base.coverUrl || extra?.coverUrl || `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`,
   };
+}
+
+/** « titre - auteur », « titre, auteur » ou « titre de auteur » → { title, author } (auteur optionnel). */
+function splitQuery(text: string): { title: string; author?: string } {
+  const m = text.match(/^(.+?)\s+(?:-|–|—|,|par|de|by)\s+(.+)$/i);
+  return m ? { title: m[1].trim(), author: m[2].trim() } : { title: text.trim() };
+}
+
+const fold = (t: string) =>
+  t
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+/** Recherche libre par titre et/ou auteur ; renvoie des résultats dédoublonnés, éditions avec ISBN d'abord. */
+export async function searchBooks(text: string): Promise<LookupResult[]> {
+  const { title, author } = splitQuery(text);
+  const googleQs = author
+    ? [`intitle:${title} inauthor:${author}`, `${title} ${author}`]
+    : [title];
+  const olParams = author
+    ? `title=${encodeURIComponent(title)}&author=${encodeURIComponent(author)}`
+    : `q=${encodeURIComponent(title)}`;
+
+  const settled = await Promise.allSettled([
+    ...googleQs.map((q) => googleQuery(q, 10).then((vs) => vs.map((v) => googleToResult(v)))),
+    openLibrarySearch(olParams, 10),
+  ]);
+  const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
+
+  const seen = new Set<string>();
+  const out: LookupResult[] = [];
+  for (const r of all) {
+    if (!r.title) continue;
+    const key = r.isbn ?? `${fold(r.title)}|${fold(r.authors[0] ?? '')}`;
+    const loose = `${fold(r.title)}|${fold(r.authors[0] ?? '')}`;
+    if (seen.has(key) || seen.has(loose)) continue;
+    seen.add(key);
+    seen.add(loose);
+    out.push(r);
+  }
+  const score = (r: LookupResult) => (r.isbn ? 2 : 0) + (r.coverUrl ? 1 : 0) + (fold(r.title).includes(fold(title)) ? 2 : 0);
+  return out.sort((a, b) => score(b) - score(a)).slice(0, 15);
 }
