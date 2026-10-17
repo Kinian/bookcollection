@@ -28,6 +28,7 @@ jobs:
           VITE_FIREBASE_PROJECT_ID: bookcollection-3a5c6
           VITE_FIREBASE_STORAGE_BUCKET: bookcollection-3a5c6.firebasestorage.app
           VITE_FIREBASE_MESSAGING_SENDER_ID: "76956591584"
+          VITE_GOOGLE_BOOKS_API_KEY: ${{ secrets.GOOGLE_BOOKS_API_KEY }}
           VITE_FIREBASE_APP_ID: 1:76956591584:web:d119e101fa1b0c644b3785
 
       - uses: google-github-actions/auth@v2
