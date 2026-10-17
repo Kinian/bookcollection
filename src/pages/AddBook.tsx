@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import BookForm from '../components/BookForm';
 import Cover from '../components/Cover';
-import { lookupIsbn, normalizeIsbn, isValidIsbn, searchBooks, type LookupResult } from '../lib/lookup';
+import { foldText, lookupIsbn, normalizeIsbn, isValidIsbn, searchBooks, type LookupResult } from '../lib/lookup';
 import { addBook } from '../lib/books';
 import { useApp } from '../lib/store';
 import type { BookInput } from '../lib/types';
@@ -22,6 +22,7 @@ export default function AddBook() {
   const [step, setStep] = useState<Step>({ kind: 'search' });
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [edition, setEdition] = useState('');
 
   const search = useCallback(
     async (raw: string) => {
@@ -65,6 +66,7 @@ export default function AddBook() {
     setBusy(true);
     try {
       const items = await searchBooks(query);
+      setEdition('');
       if (items.length) setStep({ kind: 'results', query, items });
       else setError('Aucun résultat. Essayez « titre auteur » ou saisissez le livre manuellement.');
     } catch {
@@ -104,18 +106,36 @@ export default function AddBook() {
   if (step.kind === 'loading') return <div className="page muted">Recherche de l’ISBN {step.isbn}…</div>;
 
   if (step.kind === 'results') {
+    // Chaque mot du filtre doit apparaître dans l'éditeur, l'année, l'ISBN ou le titre : « poche 2009 », « J'ai lu »…
+    const words = foldText(edition).split(' ').filter(Boolean);
+    const items = step.items.filter((r) => {
+      const hay = foldText([r.title, r.subtitle, r.publisher, r.publishedDate, r.isbn, r.language].filter(Boolean).join(' '));
+      return words.every((w) => hay.includes(w));
+    });
     return (
       <section className="page">
         <h2>Résultats pour « {step.query} »</h2>
+        <input
+          className="input"
+          placeholder="Filtrer l'édition : éditeur, année, ISBN…"
+          value={edition}
+          onChange={(e) => setEdition(e.target.value)}
+        />
+        <p className="muted small">
+          {items.length} édition{items.length > 1 ? 's' : ''}
+          {items.length < step.items.length && ` sur ${step.items.length}`}
+        </p>
         {busy && <p className="muted">Chargement de la fiche…</p>}
-        {step.items.map((r, i) => (
+        {items.map((r, i) => (
           <button key={`${r.isbn ?? r.title}-${i}`} className="card result" onClick={() => pick(r)} disabled={busy}>
             <Cover book={r} size="sm" />
             <span className="result-text">
               <strong>{r.title}</strong>
               <span className="muted small">{r.authors.join(', ') || 'Auteur inconnu'}</span>
               <span className="muted small">
-                {[r.publisher, r.publishedDate?.slice(0, 4), r.isbn && `ISBN ${r.isbn}`].filter(Boolean).join(' · ')}
+                {[r.publisher, r.publishedDate?.slice(0, 4), r.pageCount && `${r.pageCount} p.`, r.isbn && `ISBN ${r.isbn}`]
+                  .filter(Boolean)
+                  .join(' · ')}
               </span>
             </span>
           </button>

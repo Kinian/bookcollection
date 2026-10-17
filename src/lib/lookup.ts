@@ -177,9 +177,10 @@ function googleToResult(v: any, fallbackIsbn?: string): LookupResult {
 }
 
 async function googleQuery(q: string, max = 1): Promise<any[]> {
-  const res = await fetch(
-    `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=${max}&printType=books${googleKey()}`,
-  );
+  const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=${max}&printType=books`;
+  let res = await fetch(url + googleKey());
+  // Clé épuisée (429) ou refusée (403, restriction de domaine) → on retente sans clé plutôt que d'abandonner Google.
+  if (!res.ok && googleKey()) res = await fetch(url);
   if (!res.ok) return [];
   const json = await res.json();
   return (json.items ?? []).map((i: any) => i.volumeInfo).filter(Boolean);
@@ -190,12 +191,15 @@ async function fromGoogle(isbn: string): Promise<LookupResult | null> {
     const [v] = await googleQuery(`isbn:${variant}`);
     if (v) return googleToResult(v, isbn);
   }
-  // Certaines éditions ne sont trouvées qu'en recherche libre.
+  // Certaines éditions ne sont trouvées qu'en recherche libre (sous l'une ou l'autre écriture de l'ISBN).
   const variants = isbnVariants(isbn);
-  const hit = (await googleQuery(isbn, 5)).find((v) =>
-    (v.industryIdentifiers ?? []).some((i: any) => variants.includes(normalizeIsbn(i.identifier))),
-  );
-  return hit ? googleToResult(hit, isbn) : null;
+  for (const variant of variants) {
+    const hit = (await googleQuery(variant, 10)).find((v) =>
+      (v.industryIdentifiers ?? []).some((i: any) => variants.includes(normalizeIsbn(i.identifier))),
+    );
+    if (hit) return googleToResult(hit, isbn);
+  }
+  return null;
 }
 
 async function fromOpenLibrary(isbn: string): Promise<LookupResult | null> {
@@ -310,9 +314,16 @@ async function bnfQuery(cql: string, max = 1): Promise<LookupResult[]> {
     .filter((r): r is LookupResult => !!r);
 }
 
+/** Index ISBN d'abord ; à défaut, recherche plein texte (notices où l'ISBN est saisi avec tirets ou sur l'ancien
+ *  format) en vérifiant que l'ISBN de la notice correspond bien. */
 async function fromBnf(isbn: string): Promise<LookupResult | null> {
-  for (const variant of isbnVariants(isbn)) {
+  const variants = isbnVariants(isbn);
+  for (const variant of variants) {
     const [hit] = await bnfQuery(`bib.isbn adj "${variant}"`);
+    if (hit) return { ...hit, isbn };
+  }
+  for (const variant of variants) {
+    const hit = (await bnfQuery(`bib.anywhere all "${variant}"`, 5)).find((r) => r.isbn && variants.includes(r.isbn));
     if (hit) return { ...hit, isbn };
   }
   return null;
@@ -357,7 +368,7 @@ function splitQuery(text: string): { title: string; author?: string } {
   return m ? { title: m[1].trim(), author: m[2].trim() } : { title: text.trim() };
 }
 
-const fold = (t: string) =>
+export const foldText = (t: string) =>
   t
     .toLowerCase()
     .normalize('NFD')
@@ -365,7 +376,13 @@ const fold = (t: string) =>
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 
-/** Recherche libre par titre et/ou auteur ; renvoie des résultats dédoublonnés, éditions avec ISBN d'abord. */
+/** Clé d'une édition : son ISBN-13 quand il est connu, sinon titre + auteur + éditeur + année. */
+function editionKey(r: LookupResult): string {
+  if (r.isbn) return r.isbn.length === 10 ? toIsbn13(r.isbn) : r.isbn;
+  return [r.title, r.authors[0] ?? '', r.publisher ?? '', r.publishedDate?.slice(0, 4) ?? ''].map(foldText).join('|');
+}
+
+/** Recherche libre par titre et/ou auteur ; une ligne par édition (fusionnée entre sources), éditions avec ISBN d'abord. */
 export async function searchBooks(text: string): Promise<LookupResult[]> {
   const { title, author } = splitQuery(text);
   const googleQs = author
@@ -380,23 +397,31 @@ export async function searchBooks(text: string): Promise<LookupResult[]> {
     : `bib.anywhere all "${cqlQuote(title)}"`;
 
   const settled = await Promise.allSettled([
-    ...googleQs.map((q) => googleQuery(q, 10).then((vs) => vs.map((v) => googleToResult(v)))),
-    openLibrarySearch(olParams, 10),
-    bnfQuery(bnfCql, 10), // en dernier : sans couverture, il ne doit pas supplanter les doublons de Google
+    ...googleQs.map((q) => googleQuery(q, 20).then((vs) => vs.map((v) => googleToResult(v)))),
+    openLibrarySearch(olParams, 20),
+    bnfQuery(bnfCql, 30), // la BnF liste chaque édition française (poche, grand format…) avec éditeur et année
   ]);
   const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
 
-  const seen = new Set<string>();
-  const out: LookupResult[] = [];
+  // Plusieurs éditions d'un même titre restent distinctes ; une même édition vue par deux sources est fusionnée.
+  const byKey = new Map<string, LookupResult>();
   for (const r of all) {
     if (!r.title) continue;
-    const key = r.isbn ?? `${fold(r.title)}|${fold(r.authors[0] ?? '')}`;
-    const loose = `${fold(r.title)}|${fold(r.authors[0] ?? '')}`;
-    if (seen.has(key) || seen.has(loose)) continue;
-    seen.add(key);
-    seen.add(loose);
-    out.push(r);
+    const key = editionKey(r);
+    const prev = byKey.get(key);
+    if (!prev) byKey.set(key, r);
+    else
+      byKey.set(key, {
+        ...prev,
+        authors: prev.authors.length ? prev.authors : r.authors,
+        publisher: prev.publisher || r.publisher,
+        publishedDate: prev.publishedDate || r.publishedDate,
+        pageCount: prev.pageCount || r.pageCount,
+        coverUrl: prev.coverUrl || r.coverUrl,
+        language: prev.language || r.language,
+      });
   }
-  const score = (r: LookupResult) => (r.isbn ? 2 : 0) + (r.coverUrl ? 1 : 0) + (fold(r.title).includes(fold(title)) ? 2 : 0);
-  return out.sort((a, b) => score(b) - score(a)).slice(0, 15);
+  const out = [...byKey.values()];
+  const score = (r: LookupResult) => (r.isbn ? 2 : 0) + (r.coverUrl ? 1 : 0) + (foldText(r.title).includes(foldText(title)) ? 2 : 0);
+  return out.sort((a, b) => score(b) - score(a)).slice(0, 40);
 }
