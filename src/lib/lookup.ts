@@ -139,25 +139,82 @@ async function openLibrarySearch(params: string, limit: number): Promise<LookupR
   return (json.docs ?? []).map(olDocToResult).filter((r: LookupResult) => r.title);
 }
 
-/** Interroge Google Books puis complète les trous avec Open Library. */
+
+// --- BnF (catalogue général, SRU / Dublin Core) -------------------------------------------------
+
+const dcAll = (rec: Element, tag: string) =>
+  [...rec.getElementsByTagName(`dc:${tag}`)].map((n) => n.textContent?.trim() ?? '').filter(Boolean);
+
+function bnfRecordToResult(rec: Element): LookupResult | null {
+  const title = dcAll(rec, 'title')[0]?.split(/\s+\/\s+/)[0].trim();
+  if (!title) return null;
+  const authors = [
+    ...new Set(
+      dcAll(rec, 'creator').map((c) => {
+        const name = c.replace(/\.\s+[A-ZÉ][^.]*$/, '').replace(/\s*\([^)]*\)/g, '').trim(); // retire rôle et dates
+        const [last, first] = name.split(/,\s*/);
+        return first ? `${first} ${last}` : last;
+      }),
+    ),
+  ];
+  const isbnRaw = dcAll(rec, 'identifier').find((i) => /^ISBN/i.test(i));
+  const isbn = isbnRaw ? normalizeIsbn(isbnRaw.replace(/^ISBN\s*/i, '').split(/\s/)[0]) : undefined;
+  const lang = dcAll(rec, 'language')[0];
+  return {
+    isbn: isbn && isValidIsbn(isbn) ? isbn : undefined,
+    title,
+    authors,
+    publisher: dcAll(rec, 'publisher')[0]?.split(/\s*:\s*/).pop()?.replace(/,?\s*\d{4}.*$/, '').trim() || undefined,
+    publishedDate: dcAll(rec, 'date')[0]?.match(/\d{4}/)?.[0],
+    pageCount: Number(dcAll(rec, 'format').join(' ').match(/(\d+)\s*p\./)?.[1]) || undefined,
+    language: lang === 'fre' ? 'fr' : lang === 'eng' ? 'en' : lang,
+    description: dcAll(rec, 'description')[0],
+    categories: [],
+  };
+}
+
+async function bnfQuery(cql: string, max = 1): Promise<LookupResult[]> {
+  const url =
+    `https://catalogue.bnf.fr/api/SRU?version=1.2&operation=searchRetrieve&recordSchema=dublincore` +
+    `&maximumRecords=${max}&query=${encodeURIComponent(cql)}`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const xml = new DOMParser().parseFromString(await res.text(), 'application/xml');
+  return [...xml.getElementsByTagName('oai_dc:dc')]
+    .map(bnfRecordToResult)
+    .filter((r): r is LookupResult => !!r);
+}
+
+async function fromBnf(isbn: string): Promise<LookupResult | null> {
+  for (const variant of isbnVariants(isbn)) {
+    const [hit] = await bnfQuery(`bib.isbn adj "${variant}"`);
+    if (hit) return { ...hit, isbn };
+  }
+  return null;
+}
+
+const cqlQuote = (t: string) => t.replace(/["\\]/g, ' ');
+
+/** Interroge Google Books, la BnF et Open Library, puis comble les trous dans cet ordre de priorité. */
 export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
   const isbn = normalizeIsbn(raw);
-  const [g, o] = await Promise.allSettled([fromGoogle(isbn), fromOpenLibrary(isbn)]);
-  const google = g.status === 'fulfilled' ? g.value : null;
-  const ol = o.status === 'fulfilled' ? o.value : null;
-  if (!google && !ol) return null;
-  const base = google ?? ol!;
-  const extra = google ? ol : null;
+  const settled = await Promise.allSettled([fromGoogle(isbn), fromBnf(isbn), fromOpenLibrary(isbn)]);
+  const found = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
+  if (!found.length) return null;
+  const pick = <T,>(f: (r: LookupResult) => T | undefined | '') => found.map(f).find(Boolean) || undefined;
   return {
-    ...base,
+    ...found[0],
     isbn,
-    title: base.title || extra?.title || '',
-    authors: base.authors.length ? base.authors : extra?.authors ?? [],
-    description: base.description || extra?.description,
-    pageCount: base.pageCount || extra?.pageCount,
-    categories: base.categories.length ? base.categories : extra?.categories ?? [],
-    coverUrl:
-      base.coverUrl || extra?.coverUrl || `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`,
+    title: pick((r) => r.title) ?? '',
+    subtitle: pick((r) => r.subtitle),
+    authors: found.find((r) => r.authors.length)?.authors ?? [],
+    description: pick((r) => r.description),
+    pageCount: pick((r) => r.pageCount),
+    categories: found.find((r) => r.categories.length)?.categories ?? [],
+    publisher: pick((r) => r.publisher),
+    publishedDate: pick((r) => r.publishedDate),
+    language: pick((r) => r.language),
+    coverUrl: pick((r) => r.coverUrl) ?? `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`,
   };
 }
 
@@ -185,9 +242,14 @@ export async function searchBooks(text: string): Promise<LookupResult[]> {
     ? `title=${encodeURIComponent(title)}&author=${encodeURIComponent(author)}`
     : `q=${encodeURIComponent(title)}`;
 
+  const bnfCql = author
+    ? `bib.title all "${cqlQuote(title)}" and bib.author all "${cqlQuote(author)}"`
+    : `bib.anywhere all "${cqlQuote(title)}"`;
+
   const settled = await Promise.allSettled([
     ...googleQs.map((q) => googleQuery(q, 10).then((vs) => vs.map((v) => googleToResult(v)))),
     openLibrarySearch(olParams, 10),
+    bnfQuery(bnfCql, 10), // en dernier : sans couverture, il ne doit pas supplanter les doublons de Google
   ]);
   const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
 
