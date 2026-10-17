@@ -41,8 +41,10 @@ export default function BookDetail() {
     if (!book.isbn) return;
     const r = await lookupIsbn(book.isbn);
     if (r) {
+      // Anciens résumés erronés : une note de collection BnF (« Collection : … ») n'est pas un résumé.
+      const current = /^Collection\s*:/i.test(book.description ?? '') ? undefined : book.description;
       updateBook(uid, book.id, {
-        description: book.description || r.description,
+        description: current || r.description,
         coverUrl: book.coverUrl || r.coverUrl,
         pageCount: book.pageCount || r.pageCount,
         categories: book.categories.length ? book.categories : r.categories,
@@ -53,7 +55,7 @@ export default function BookDetail() {
     }
   };
 
-  const incomplete = book.isbn && (!book.description || !book.coverUrl || !book.pageCount);
+  const incomplete = book.isbn && (!book.description || /^Collection\s*:/i.test(book.description) || !book.coverUrl || !book.pageCount);
 
   return (
     <section className="page">

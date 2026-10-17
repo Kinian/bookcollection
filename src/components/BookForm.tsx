@@ -25,6 +25,7 @@ export default function BookForm({ initial, submitLabel, onSubmit, onCancel }: P
     endDate: initial.endDate ?? '',
     rating: initial.rating ?? 0,
     notes: initial.notes ?? '',
+    description: initial.description ?? '',
   });
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
 
@@ -56,6 +57,7 @@ export default function BookForm({ initial, submitLabel, onSubmit, onCancel }: P
       endDate: f.status === 'read' || f.status === 'abandoned' ? f.endDate || undefined : undefined,
       rating: f.rating || undefined,
       notes: f.notes.trim() || undefined,
+      description: f.description.trim() || undefined,
     });
   };
 
@@ -124,6 +126,11 @@ export default function BookForm({ initial, submitLabel, onSubmit, onCancel }: P
           </div>
         </label>
       )}
+
+      <label>
+        Résumé
+        <textarea className="input" rows={4} value={f.description} onChange={set('description')} placeholder="Résumé du livre" />
+      </label>
 
       <label>
         Notes personnelles

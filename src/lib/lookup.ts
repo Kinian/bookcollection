@@ -191,8 +191,11 @@ async function fromGoogle(isbn: string): Promise<LookupResult | null> {
     if (v) return googleToResult(v, isbn);
   }
   // Certaines éditions ne sont trouvées qu'en recherche libre.
-  const [v] = await googleQuery(isbn);
-  return v ? googleToResult(v, isbn) : null;
+  const variants = isbnVariants(isbn);
+  const hit = (await googleQuery(isbn, 5)).find((v) =>
+    (v.industryIdentifiers ?? []).some((i: any) => variants.includes(normalizeIsbn(i.identifier))),
+  );
+  return hit ? googleToResult(hit, isbn) : null;
 }
 
 async function fromOpenLibrary(isbn: string): Promise<LookupResult | null> {
@@ -213,7 +216,6 @@ async function fromOpenLibrary(isbn: string): Promise<LookupResult | null> {
         publisher: b.publishers?.[0]?.name,
         publishedDate: b.publish_date,
         coverUrl: b.cover?.large || b.cover?.medium,
-        description: typeof b.notes === 'string' ? b.notes : b.notes?.value,
       };
     }
   }
@@ -251,6 +253,20 @@ async function openLibrarySearch(params: string, limit: number): Promise<LookupR
 
 // --- BnF (catalogue général, SRU / Dublin Core) -------------------------------------------------
 
+/** « Collection : Le livre de poche : thriller ; 35805 » → « thriller ». Sans genre explicite → undefined. */
+function genreFromCollection(notes: string[]): string | undefined {
+  const known = new Set(Object.values(CATEGORY_FR).map((v) => v.toLowerCase()).concat(['roman', 'policier', 'thriller']));
+  for (const note of notes) {
+    const m = note.match(/^Collection\s*:\s*([^;]+)/i);
+    if (!m) continue;
+    const segs = m[1].split(/\s*:\s*/).map((x) => x.trim());
+    if (segs.length > 1) return segs[segs.length - 1];
+    const tail = m[1].split(/\.\s+/).pop()?.trim();
+    if (tail && known.has(tail.toLowerCase())) return tail;
+  }
+  return undefined;
+}
+
 const dcAll = (rec: Element, tag: string) =>
   [...rec.getElementsByTagName(`dc:${tag}`)].map((n) => n.textContent?.trim() ?? '').filter(Boolean);
 
@@ -277,8 +293,8 @@ function bnfRecordToResult(rec: Element): LookupResult | null {
     publishedDate: dcAll(rec, 'date')[0]?.match(/\d{4}/)?.[0],
     pageCount: Number(dcAll(rec, 'format').join(' ').match(/(\d+)\s*p\./)?.[1]) || undefined,
     language: lang === 'fre' ? 'fr' : lang === 'eng' ? 'en' : lang,
-    description: dcAll(rec, 'description')[0],
-    categories: cleanCategories(dcAll(rec, 'subject')),
+    // dc:description de la BnF ne contient que des notes bibliographiques (collection, traduction…), jamais le résumé.
+    categories: cleanCategories([genreFromCollection(dcAll(rec, 'description')) ?? '', ...dcAll(rec, 'subject')]),
   };
 }
 
