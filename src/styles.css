@@ -89,6 +89,7 @@ h3 { font-size: 1rem; margin: 1rem 0 0.5rem; }
 .btn:disabled { opacity: 0.6; }
 .btn-primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
 .btn-big { width: 100%; min-height: 64px; font-size: 1.05rem; }
+.btn-small { min-height: 32px; padding: 4px 10px; font-size: 0.8rem; justify-content: center; cursor: pointer; }
 .btn-link { border: 0; background: none; color: var(--primary); padding: 0; margin: 14px 0; }
 .btn-light { background: #fff; color: #1c1f26; }
 .btn-danger-outline { color: var(--danger); border-color: currentColor; background: transparent; width: 100%; margin-top: 20px; }
@@ -154,6 +155,7 @@ label .input { color: var(--text); font-size: 1rem; }
 /* Form */
 .form { display: flex; flex-direction: column; gap: 12px; }
 .form-head { display: flex; gap: 14px; }
+.cover-pick { gap: 6px; align-items: stretch; }
 .form .row { margin: 0; }
 .segmented { display: flex; background: var(--line); border-radius: 10px; padding: 3px; }
 .segmented button { flex: 1; border: 0; background: none; color: var(--text); padding: 8px 4px; border-radius: 8px; font: inherit; font-size: 0.85rem; cursor: pointer; }

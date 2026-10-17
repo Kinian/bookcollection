@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { db } from './firebase';
+import { embedCover } from './cover';
 import type { Book, BookInput } from './types';
 
 const booksCol = (uid: string) => collection(db, 'users', uid, 'books');
@@ -50,5 +51,29 @@ export function useBooks(uid: string | undefined) {
     });
   }, [uid]);
 
+  useEmbedCovers(uid, books);
+
   return { books, loading, pending };
+}
+
+const embedTried = new Set<string>();
+
+/**
+ * Remplace en tâche de fond les couvertures distantes (http…) par une copie stockée dans la fiche.
+ * Couvre les nouveaux livres comme ceux déjà en bibliothèque ; une seule tentative par session et par URL.
+ */
+function useEmbedCovers(uid: string | undefined, books: Book[]) {
+  useEffect(() => {
+    if (!uid || !navigator.onLine) return;
+    const todo = books.filter((b) => b.coverUrl?.startsWith('http') && !embedTried.has(b.coverUrl));
+    if (!todo.length) return;
+    todo.forEach((b) => embedTried.add(b.coverUrl!));
+    (async () => {
+      for (const b of todo) {
+        const data = await embedCover(b.coverUrl!);
+        // Pas de updatedAt : c'est une mise en cache, pas une modification du livre.
+        if (data) await updateDoc(doc(booksCol(uid), b.id), { coverUrl: data }).catch(console.error);
+      }
+    })();
+  }, [uid, books]);
 }

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { STATUS_LABEL, type BookInput, type BookStatus } from '../lib/types';
 import { today } from '../lib/store';
 import Cover from './Cover';
+import { blobToCover, isEmbedded } from '../lib/cover';
 
 interface Props {
   initial: Partial<BookInput>;
@@ -27,6 +28,19 @@ export default function BookForm({ initial, submitLabel, onSubmit, onCancel }: P
     notes: initial.notes ?? '',
     description: initial.description ?? '',
   });
+  const [coverError, setCoverError] = useState<string>();
+
+  const pickCover = async (file?: File) => {
+    if (!file) return;
+    setCoverError(undefined);
+    try {
+      const data = await blobToCover(file);
+      setF((prev) => ({ ...prev, coverUrl: data }));
+    } catch {
+      setCoverError('Image illisible : essayez une photo JPEG ou PNG.');
+    }
+  };
+
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
 
   const setStatus = (status: BookStatus) => {
@@ -64,7 +78,21 @@ export default function BookForm({ initial, submitLabel, onSubmit, onCancel }: P
   return (
     <form className="form" onSubmit={submit}>
       <div className="form-head">
-        <Cover book={{ title: f.title, coverUrl: f.coverUrl }} size="md" />
+        <div className="stack cover-pick">
+          <Cover key={f.coverUrl} book={{ title: f.title, coverUrl: f.coverUrl }} size="md" />
+          <label className="btn btn-small">
+            {f.coverUrl ? 'Changer' : 'Ajouter'}
+            <input
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(e) => {
+                pickCover(e.target.files?.[0]);
+                e.target.value = '';
+              }}
+            />
+          </label>
+        </div>
         <div className="stack grow">
           <label>
             Titre*
@@ -137,6 +165,8 @@ export default function BookForm({ initial, submitLabel, onSubmit, onCancel }: P
         <textarea className="input" rows={3} value={f.notes} onChange={set('notes')} />
       </label>
 
+      {coverError && <p className="error">{coverError}</p>}
+
       <details>
         <summary className="muted small">Plus</summary>
         <label>
@@ -145,7 +175,12 @@ export default function BookForm({ initial, submitLabel, onSubmit, onCancel }: P
         </label>
         <label>
           URL de couverture
-          <input className="input" value={f.coverUrl} onChange={set('coverUrl')} />
+          <input
+            className="input"
+            placeholder={isEmbedded(f.coverUrl) ? 'Image enregistrée dans la fiche' : undefined}
+            value={isEmbedded(f.coverUrl) ? '' : f.coverUrl}
+            onChange={set('coverUrl')}
+          />
         </label>
       </details>
 
