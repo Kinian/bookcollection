@@ -42,6 +42,115 @@ function isbnVariants(isbn: string): string[] {
   return ten ? [isbn, ten] : [isbn];
 }
 
+
+// --- Genres : nettoyage et traduction ------------------------------------------------------------
+
+const CATEGORY_FR: Record<string, string> = {
+  fiction: 'Fiction',
+  'juvenile fiction': 'Jeunesse',
+  'juvenile nonfiction': 'Jeunesse',
+  'young adult fiction': 'Young adult',
+  'biography & autobiography': 'Biographie',
+  biography: 'Biographie',
+  history: 'Histoire',
+  'science fiction': 'Science-fiction',
+  fantasy: 'Fantasy',
+  mystery: 'Policier',
+  'detective and mystery stories': 'Policier',
+  'mystery & detective': 'Policier',
+  thrillers: 'Thriller',
+  thriller: 'Thriller',
+  romance: 'Romance',
+  'literary criticism': 'Critique littéraire',
+  'literary collections': 'Littérature',
+  poetry: 'Poésie',
+  drama: 'Théâtre',
+  philosophy: 'Philosophie',
+  psychology: 'Psychologie',
+  religion: 'Religion',
+  'comics & graphic novels': 'BD',
+  'graphic novels': 'BD',
+  classics: 'Classiques',
+  'business & economics': 'Économie',
+  cooking: 'Cuisine',
+  science: 'Sciences',
+  humor: 'Humour',
+  travel: 'Voyage',
+  'self-help': 'Développement personnel',
+  'social science': 'Sciences sociales',
+  'political science': 'Politique',
+  'true crime': 'Faits divers',
+  horror: 'Horreur',
+  'french fiction': 'Roman français',
+  'french literature': 'Littérature française',
+};
+
+const CATEGORY_NOISE = /accessible book|protected daisy|large type|staff picks|in library|lending library|nyt:|^reading level|^open library|^overdrive|^internet archive|\d{3}\.\d|^[a-z]{2}\d/i;
+
+/** « Fiction / Classics », « Romans -- 19e siècle »… → genres courts, dédoublonnés, en français quand c'est connu. */
+function cleanCategories(raw: string[] | undefined, max = 4): string[] {
+  const out: string[] = [];
+  for (const entry of raw ?? []) {
+    for (const part of String(entry).split(/\s*(?:\/|--|;)\s*/)) {
+      const t = part.trim();
+      if (!t || t.length > 40 || CATEGORY_NOISE.test(t)) continue;
+      const label = CATEGORY_FR[t.toLowerCase()] ?? t.charAt(0).toUpperCase() + t.slice(1);
+      if (!out.some((o) => o.toLowerCase() === label.toLowerCase())) out.push(label);
+    }
+  }
+  return out.slice(0, max);
+}
+
+// --- Couvertures : on ne garde qu'une image qui se charge vraiment -------------------------------
+
+function imageLoads(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const timer = setTimeout(() => resolve(false), 6000);
+    img.onload = () => {
+      clearTimeout(timer);
+      resolve(img.naturalWidth > 30 && img.naturalHeight > 30); // écarte les pixels « pas de couverture »
+    };
+    img.onerror = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    img.src = url;
+  });
+}
+
+async function findCover(isbn: string, known?: string): Promise<string | undefined> {
+  const variants = isbnVariants(isbn);
+  const ten = variants.find((v) => v.length === 10);
+  const candidates = [
+    known,
+    known?.replace('zoom=2', 'zoom=1'),
+    ...variants.map((v) => `https://covers.openlibrary.org/b/isbn/${v}-L.jpg?default=false`),
+    ten && `https://images-na.ssl-images-amazon.com/images/P/${ten}.01.LZZZZZZZ.jpg`,
+  ].filter((u, i, a): u is string => !!u && a.indexOf(u) === i);
+  for (const url of candidates) if (await imageLoads(url)) return url;
+  return undefined;
+}
+
+/** Sujets Open Library d'une édition, puis de son œuvre, quand les autres sources n'ont pas de genre. */
+async function olSubjects(isbn: string): Promise<string[]> {
+  for (const v of isbnVariants(isbn)) {
+    const res = await fetch(`https://openlibrary.org/isbn/${v}.json`);
+    if (!res.ok) continue;
+    const ed = await res.json();
+    if (ed.subjects?.length) return ed.subjects;
+    const work = ed.works?.[0]?.key;
+    if (work) {
+      const w = await fetch(`https://openlibrary.org${work}.json`);
+      if (w.ok) {
+        const wj = await w.json();
+        if (wj.subjects?.length) return wj.subjects;
+      }
+    }
+  }
+  return [];
+}
+
 const googleKey = () => {
   const key = import.meta.env.VITE_GOOGLE_BOOKS_API_KEY;
   return key ? `&key=${key}` : '';
@@ -59,7 +168,7 @@ function googleToResult(v: any, fallbackIsbn?: string): LookupResult {
     authors: v.authors ?? [],
     description: v.description,
     pageCount: v.pageCount || undefined,
-    categories: v.categories ?? [],
+    categories: cleanCategories(v.categories),
     publisher: v.publisher,
     publishedDate: v.publishedDate,
     language: v.language,
@@ -100,7 +209,7 @@ async function fromOpenLibrary(isbn: string): Promise<LookupResult | null> {
         subtitle: b.subtitle,
         authors: (b.authors ?? []).map((a: any) => a.name),
         pageCount: b.number_of_pages,
-        categories: (b.subjects ?? []).slice(0, 3).map((s: any) => s.name),
+        categories: cleanCategories((b.subjects ?? []).map((s: any) => s.name)),
         publisher: b.publishers?.[0]?.name,
         publishedDate: b.publish_date,
         coverUrl: b.cover?.large || b.cover?.medium,
@@ -124,7 +233,7 @@ function olDocToResult(d: any): LookupResult {
     subtitle: d.subtitle,
     authors: d.author_name ?? [],
     pageCount: d.number_of_pages_median,
-    categories: (d.subject ?? []).slice(0, 3),
+    categories: cleanCategories(d.subject),
     publisher: d.publisher?.[0],
     publishedDate: d.first_publish_year ? String(d.first_publish_year) : undefined,
     language: d.language?.[0] === 'fre' ? 'fr' : d.language?.[0],
@@ -169,7 +278,7 @@ function bnfRecordToResult(rec: Element): LookupResult | null {
     pageCount: Number(dcAll(rec, 'format').join(' ').match(/(\d+)\s*p\./)?.[1]) || undefined,
     language: lang === 'fre' ? 'fr' : lang === 'eng' ? 'en' : lang,
     description: dcAll(rec, 'description')[0],
-    categories: [],
+    categories: cleanCategories(dcAll(rec, 'subject')),
   };
 }
 
@@ -202,6 +311,14 @@ export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
   const found = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
   if (!found.length) return null;
   const pick = <T,>(f: (r: LookupResult) => T | undefined | '') => found.map(f).find(Boolean) || undefined;
+
+  let categories = cleanCategories(found.flatMap((r) => r.categories));
+  const [cover, subjects] = await Promise.all([
+    findCover(isbn, pick((r) => r.coverUrl)),
+    categories.length ? Promise.resolve([]) : olSubjects(isbn).catch(() => []),
+  ]);
+  if (!categories.length) categories = cleanCategories(subjects);
+
   return {
     ...found[0],
     isbn,
@@ -210,11 +327,11 @@ export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
     authors: found.find((r) => r.authors.length)?.authors ?? [],
     description: pick((r) => r.description),
     pageCount: pick((r) => r.pageCount),
-    categories: found.find((r) => r.categories.length)?.categories ?? [],
+    categories,
     publisher: pick((r) => r.publisher),
     publishedDate: pick((r) => r.publishedDate),
     language: pick((r) => r.language),
-    coverUrl: pick((r) => r.coverUrl) ?? `https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`,
+    coverUrl: cover,
   };
 }
 
