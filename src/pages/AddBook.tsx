@@ -22,6 +22,7 @@ export default function AddBook() {
   const [step, setStep] = useState<Step>({ kind: 'search' });
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [refine, setRefine] = useState('');
 
   const search = useCallback(
     async (raw: string) => {
@@ -65,6 +66,7 @@ export default function AddBook() {
     setBusy(true);
     try {
       const items = await searchBooks(query);
+      setRefine('');
       if (items.length) setStep({ kind: 'results', query, items });
       else setError('Aucun résultat. Essayez « titre auteur » ou saisissez le livre manuellement.');
     } catch {
@@ -104,19 +106,37 @@ export default function AddBook() {
   if (step.kind === 'loading') return <div className="page muted">Recherche de l’ISBN {step.isbn}…</div>;
 
   if (step.kind === 'results') {
+    const editionLine = (r: LookupResult) =>
+      [r.publisher, r.publishedDate?.slice(0, 4), r.pageCount && `${r.pageCount} p.`, r.isbn && `ISBN ${r.isbn}`]
+        .filter(Boolean)
+        .join(' · ');
+    // Filtre local sur l'édition : éditeur, année, ISBN… (« poche 2009 » garde les éditions qui contiennent les deux).
+    const terms = refine.toLowerCase().split(/\s+/).filter(Boolean);
+    const items = step.items.filter((r) => {
+      const text = `${r.title} ${r.subtitle ?? ''} ${r.authors.join(' ')} ${editionLine(r)}`.toLowerCase();
+      return terms.every((t) => text.includes(t));
+    });
     return (
       <section className="page">
         <h2>Résultats pour « {step.query} »</h2>
+        <input
+          className="input"
+          placeholder="Préciser l’édition : éditeur, année, ISBN…"
+          value={refine}
+          onChange={(e) => setRefine(e.target.value)}
+        />
+        <p className="muted small">
+          {items.length} édition{items.length > 1 ? 's' : ''}. Vous avez le livre en main ? Scannez ou tapez son ISBN pour
+          l’édition exacte.
+        </p>
         {busy && <p className="muted">Chargement de la fiche…</p>}
-        {step.items.map((r, i) => (
+        {items.map((r, i) => (
           <button key={`${r.isbn ?? r.title}-${i}`} className="card result" onClick={() => pick(r)} disabled={busy}>
             <Cover book={r} size="sm" />
             <span className="result-text">
               <strong>{r.title}</strong>
               <span className="muted small">{r.authors.join(', ') || 'Auteur inconnu'}</span>
-              <span className="muted small">
-                {[r.publisher, r.publishedDate?.slice(0, 4), r.isbn && `ISBN ${r.isbn}`].filter(Boolean).join(' · ')}
-              </span>
+              <span className="muted small">{editionLine(r)}</span>
             </span>
           </button>
         ))}

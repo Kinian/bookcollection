@@ -251,6 +251,13 @@ async function openLibrarySearch(params: string, limit: number): Promise<LookupR
 }
 
 
+/** Raison sociale des catalogues → nom sous lequel l'éditeur est connu. */
+function prettyPublisher(p?: string): string | undefined {
+  if (!p) return undefined;
+  if (/librairie g[ée]n[ée]rale fran[çc]aise|^l\.?\s?g\.?\s?f\b/i.test(p)) return 'Le Livre de Poche';
+  return p.replace(/\s*\((?:[^()]|\([^()]*\))*\)$/, '').trim() || undefined; // retire la ville : « Presses pocket (Paris) »
+}
+
 // --- BnF (catalogue général, SRU / Dublin Core) -------------------------------------------------
 
 /** « Collection : Le livre de poche : thriller ; 35805 » → « thriller ». Sans genre explicite → undefined. */
@@ -271,7 +278,11 @@ const dcAll = (rec: Element, tag: string) =>
   [...rec.getElementsByTagName(`dc:${tag}`)].map((n) => n.textContent?.trim() ?? '').filter(Boolean);
 
 function bnfRecordToResult(rec: Element): LookupResult | null {
-  const title = dcAll(rec, 'title')[0]?.split(/\s+\/\s+/)[0].trim();
+  // « Salem : roman (Éd. complétée et illustrée) Stephen King ; traduction… » → « Salem : roman »
+  const title = dcAll(rec, 'title')[0]
+    ?.split(/\s+\/\s+|\s+;\s+/)[0]
+    .replace(/\s*\((?:[ÉE]d\.|[ée]dition)[^)]*\).*$/i, '')
+    .trim();
   if (!title) return null;
   const authors = [
     ...new Set(
@@ -289,7 +300,7 @@ function bnfRecordToResult(rec: Element): LookupResult | null {
     isbn: isbn && isValidIsbn(isbn) ? isbn : undefined,
     title,
     authors,
-    publisher: dcAll(rec, 'publisher')[0]?.split(/\s*:\s*/).pop()?.replace(/,?\s*\d{4}.*$/, '').trim() || undefined,
+    publisher: prettyPublisher(dcAll(rec, 'publisher')[0]?.split(/\s*:\s*/).pop()?.replace(/,?\s*\d{4}.*$/, '').trim()),
     publishedDate: dcAll(rec, 'date')[0]?.match(/\d{4}/)?.[0],
     pageCount: Number(dcAll(rec, 'format').join(' ').match(/(\d+)\s*p\./)?.[1]) || undefined,
     language: lang === 'fre' ? 'fr' : lang === 'eng' ? 'en' : lang,
@@ -320,10 +331,72 @@ async function fromBnf(isbn: string): Promise<LookupResult | null> {
 
 const cqlQuote = (t: string) => t.replace(/["\\]/g, ' ');
 
-/** Interroge Google Books, la BnF et Open Library, puis comble les trous dans cet ordre de priorité. */
+
+// --- Sudoc (catalogue des bibliothèques universitaires, UNIMARC) ---------------------------------
+// Couvre beaucoup de poches et rééditions françaises absentes de Google, de la BnF et d'Open Library.
+
+/** « Roman d'épouvante américain » (forme Rameau) → genre court. */
+function genreFromRameau(form: string): string {
+  const known: [RegExp, string][] = [
+    [/épouvante|horreur/i, 'Horreur'],
+    [/science-fiction/i, 'Science-fiction'],
+    [/fantastique/i, 'Fantastique'],
+    [/fantasy/i, 'Fantasy'],
+    [/policier/i, 'Policier'],
+    [/espionnage/i, 'Espionnage'],
+    [/historique/i, 'Roman historique'],
+    [/bandes? dessinées?/i, 'BD'],
+  ];
+  return known.find(([re]) => re.test(form))?.[1] ?? form;
+}
+
+function sudocRecordToResult(rec: Document, isbn: string): LookupResult | null {
+  const fields = (tag: string) => [...rec.querySelectorAll(`datafield[tag="${tag}"]`)];
+  const sub = (field: Element | undefined, code: string) =>
+    field?.querySelector(`subfield[code="${code}"]`)?.textContent?.trim() || undefined;
+
+  const t200 = fields('200')[0];
+  const title = sub(t200, 'a');
+  if (!title) return null;
+  const imprint = [...fields('210'), ...fields('214')].filter((f) => sub(f, 'c') || sub(f, 'd'));
+  const authors = [...fields('700'), ...fields('701')].map((f) => [sub(f, 'b'), sub(f, 'a')].filter(Boolean).join(' '));
+  const summary = sub(fields('330')[0], 'a')
+    ?.replace(/^La 4e de couv(?:erture|\.)? (?:indique|porte)\s*:\s*/i, '')
+    .replace(/^«\s*|\s*»$/g, '');
+  const lang = fields('101')[0] && sub(fields('101')[0], 'a');
+  return {
+    isbn,
+    title,
+    subtitle: sub(t200, 'e'),
+    authors: authors.length ? authors : sub(t200, 'f') ? [sub(t200, 'f')!] : [],
+    description: summary,
+    pageCount: Number(sub(fields('215')[0], 'a')?.match(/(\d+)\s*(?:p\.|pages)/)?.[1]) || undefined,
+    categories: cleanCategories(fields('608').map((f) => genreFromRameau(sub(f, 'a') ?? ''))),
+    publisher: prettyPublisher(imprint.map((f) => sub(f, 'c')).find(Boolean)),
+    publishedDate: imprint.map((f) => sub(f, 'd')?.match(/\d{4}/)?.[0]).find(Boolean),
+    language: lang === 'fre' ? 'fr' : lang === 'eng' ? 'en' : lang,
+  };
+}
+
+async function fromSudoc(isbn: string): Promise<LookupResult | null> {
+  const res = await fetch(`https://www.sudoc.fr/services/isbn2ppn/${isbn}`);
+  if (!res.ok) return null;
+  const ppns = [...new DOMParser().parseFromString(await res.text(), 'application/xml').getElementsByTagName('ppn')]
+    .map((n) => n.textContent?.trim())
+    .filter(Boolean);
+  for (const ppn of ppns.slice(0, 3)) {
+    const r = await fetch(`https://www.sudoc.fr/${ppn}.xml`);
+    if (!r.ok) continue;
+    const hit = sudocRecordToResult(new DOMParser().parseFromString(await r.text(), 'application/xml'), isbn);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Interroge Google Books, la BnF, le Sudoc et Open Library, puis comble les trous dans cet ordre de priorité. */
 export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
   const isbn = normalizeIsbn(raw);
-  const settled = await Promise.allSettled([fromGoogle(isbn), fromBnf(isbn), fromOpenLibrary(isbn)]);
+  const settled = await Promise.allSettled([fromGoogle(isbn), fromBnf(isbn), fromSudoc(isbn), fromOpenLibrary(isbn)]);
   const found = settled.flatMap((r) => (r.status === 'fulfilled' && r.value ? [r.value] : []));
   if (!found.length) return null;
   const pick = <T,>(f: (r: LookupResult) => T | undefined | '') => found.map(f).find(Boolean) || undefined;
@@ -365,7 +438,7 @@ const fold = (t: string) =>
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 
-/** Recherche libre par titre et/ou auteur ; renvoie des résultats dédoublonnés, éditions avec ISBN d'abord. */
+/** Recherche libre par titre et/ou auteur ; renvoie toutes les éditions trouvées (une par ISBN), éditions avec ISBN d'abord. */
 export async function searchBooks(text: string): Promise<LookupResult[]> {
   const { title, author } = splitQuery(text);
   const googleQs = author
@@ -382,21 +455,29 @@ export async function searchBooks(text: string): Promise<LookupResult[]> {
   const settled = await Promise.allSettled([
     ...googleQs.map((q) => googleQuery(q, 10).then((vs) => vs.map((v) => googleToResult(v)))),
     openLibrarySearch(olParams, 10),
-    bnfQuery(bnfCql, 10), // en dernier : sans couverture, il ne doit pas supplanter les doublons de Google
+    bnfQuery(bnfCql, 20), // en dernier : sans couverture, il ne doit pas supplanter les doublons de Google
   ]);
   const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
 
-  const seen = new Set<string>();
+  // Chaque ISBN est une édition distincte : on les garde toutes pour pouvoir choisir la bonne.
+  // Les résultats sans ISBN ne sont gardés que si l'œuvre n'apparaît pas déjà.
+  const loose = (r: LookupResult) => `${fold(r.title)}|${fold(r.authors[0] ?? '')}`;
+  const isbn13 = (r: LookupResult) => (r.isbn?.length === 10 ? toIsbn13(r.isbn) : r.isbn);
+  const seenIsbn = new Set<string>();
+  const seenWork = new Set<string>();
   const out: LookupResult[] = [];
-  for (const r of all) {
-    if (!r.title) continue;
-    const key = r.isbn ?? `${fold(r.title)}|${fold(r.authors[0] ?? '')}`;
-    const loose = `${fold(r.title)}|${fold(r.authors[0] ?? '')}`;
-    if (seen.has(key) || seen.has(loose)) continue;
-    seen.add(key);
-    seen.add(loose);
+  for (const r of all.filter((r) => r.title && r.isbn)) {
+    const key = isbn13(r)!;
+    if (seenIsbn.has(key)) continue;
+    seenIsbn.add(key);
+    seenWork.add(loose(r));
+    out.push({ ...r, isbn: key });
+  }
+  for (const r of all.filter((r) => r.title && !r.isbn)) {
+    if (seenWork.has(loose(r))) continue;
+    seenWork.add(loose(r));
     out.push(r);
   }
   const score = (r: LookupResult) => (r.isbn ? 2 : 0) + (r.coverUrl ? 1 : 0) + (fold(r.title).includes(fold(title)) ? 2 : 0);
-  return out.sort((a, b) => score(b) - score(a)).slice(0, 15);
+  return out.sort((a, b) => score(b) - score(a)).slice(0, 40);
 }
