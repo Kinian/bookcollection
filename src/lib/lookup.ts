@@ -161,9 +161,9 @@ export async function lookupIsbn(raw: string): Promise<LookupResult | null> {
   };
 }
 
-/** « titre - auteur », « titre, auteur » ou « titre de auteur » → { title, author } (auteur optionnel). */
+/** « titre - auteur » ou « titre, auteur » → { title, author } (auteur optionnel). */
 function splitQuery(text: string): { title: string; author?: string } {
-  const m = text.match(/^(.+?)\s+(?:-|–|—|,|par|de|by)\s+(.+)$/i);
+  const m = text.match(/^(.+?)\s+(?:-|–|—|,)\s+(.+)$/i);
   return m ? { title: m[1].trim(), author: m[2].trim() } : { title: text.trim() };
 }
 
