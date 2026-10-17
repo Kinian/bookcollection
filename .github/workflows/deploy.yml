@@ -22,10 +22,17 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+        env:
+          VITE_FIREBASE_API_KEY: AIzaSyAMLTD-XId11R7Wl32rKNbCXPeAvXiWiFQ
+          VITE_FIREBASE_AUTH_DOMAIN: bookcollection-3a5c6.firebaseapp.com
+          VITE_FIREBASE_PROJECT_ID: bookcollection-3a5c6
+          VITE_FIREBASE_STORAGE_BUCKET: bookcollection-3a5c6.firebasestorage.app
+          VITE_FIREBASE_MESSAGING_SENDER_ID: "76956591584"
+          VITE_FIREBASE_APP_ID: 1:76956591584:web:d119e101fa1b0c644b3785
 
       - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
 
       - name: Deploy hosting + règles Firestore
-        run: npx --yes firebase-tools@latest deploy --only hosting,firestore --non-interactive
+        run: npx --yes firebase-tools@latest deploy --project bookcollection-3a5c6 --only hosting,firestore --non-interactive
